@@ -81,7 +81,7 @@ def get_gmail_service(instance_dir: str):
             
     if not creds or not creds.valid:
         flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
-        creds = flow.run_console()
+        creds = flow.run_local_server(port=0)
     
     # Save token.json with secure 600 permissions (read/write by owner only)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
