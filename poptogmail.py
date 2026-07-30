@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-import argparse
 import os
 import sys
+import atexit
 import base64
 import poplib
 
@@ -15,6 +15,29 @@ from googleapiclient.errors import HttpError
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 poplib._MAXLINE = 10_000_000
+
+LOCKFILE = "/tmp/poptogmail.lock"
+
+
+def _release_lock():
+    try:
+        os.remove(LOCKFILE)
+    except FileNotFoundError:
+        pass
+
+
+def acquire_lock():
+    if os.path.exists(LOCKFILE):
+        with open(LOCKFILE) as f:
+            pid = f.read().strip()
+        try:
+            os.kill(int(pid), 0)
+            sys.exit(f"[FATAL] another instance is running (pid {pid})")
+        except (OSError, ValueError, ProcessLookupError):
+            pass
+    with open(LOCKFILE, "w") as f:
+        f.write(str(os.getpid()))
+    atexit.register(_release_lock)
 
 
 def get_gmail_service(instance_dir):
@@ -35,38 +58,60 @@ def get_gmail_service(instance_dir):
     return build("gmail", "v1", credentials=creds)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--instance", required=True, help="instance name under instances/")
-    args = parser.parse_args()
+def get_instances():
+    instances = []
+    base = "instances"
+    if not os.path.isdir(base):
+        return instances
+    for name in sorted(os.listdir(base)):
+        d = os.path.join(base, name)
+        env_path = os.path.join(d, ".env")
+        if os.path.isdir(d) and name != "example" and os.path.isfile(env_path):
+            instances.append((name, d))
+    return instances
 
-    instance_dir = os.path.join("instances", args.instance)
-    env_path = os.path.join(instance_dir, ".env")
 
-    if not os.path.isdir(instance_dir):
-        sys.exit(f"[FATAL] instance directory not found: {instance_dir}")
-    if not os.path.isfile(env_path):
-        sys.exit(f"[FATAL] .env not found in instance directory: {instance_dir}")
-
+def validate_instance(name, d):
+    env_path = os.path.join(d, ".env")
     load_dotenv(env_path)
 
-    expected_gmail = os.environ.get("EXPECTED_GMAIL", "").strip()
-    if not expected_gmail:
-        sys.exit("[FATAL] EXPECTED_GMAIL is not set in .env")
+    expected = os.environ.get("EXPECTED_GMAIL", "").strip()
+    if not expected:
+        return "EXPECTED_GMAIL not set"
+
+    service = get_gmail_service(d)
+    profile = service.users().getProfile(userId="me").execute()
+    actual = profile["emailAddress"]
+    if actual.lower() != expected.lower():
+        return f"Gmail mismatch: expected '{expected}', got '{actual}'"
 
     host = os.environ["POP3_HOST"]
     user = os.environ["POP3_USER"]
     password = os.environ["POP3_PASS"]
 
-    service = get_gmail_service(instance_dir)
+    try:
+        pop = poplib.POP3_SSL(host, 995, timeout=10)
+        pop.user(user)
+        pop.pass_(password)
+        pop.quit()
+    except Exception as e:
+        return f"POP3 error: {e}"
 
-    profile = service.users().getProfile(userId="me").execute()
-    actual_email = profile["emailAddress"]
-    if actual_email.lower() != expected_gmail.lower():
-        sys.exit(
-            f"[FATAL] Gmail account mismatch: "
-            f"expected '{expected_gmail}', got '{actual_email}'"
-        )
+    return None
+
+
+def process_instance(name, d):
+    env_path = os.path.join(d, ".env")
+    load_dotenv(env_path)
+
+    host = os.environ["POP3_HOST"]
+    user = os.environ["POP3_USER"]
+    password = os.environ["POP3_PASS"]
+
+    service = get_gmail_service(d)
+
+    imported = 0
+    errors = 0
 
     pop = poplib.POP3_SSL(host, 995, timeout=30)
     try:
@@ -75,7 +120,7 @@ def main():
 
         resp, msg_list, _ = pop.list()
         if not msg_list:
-            return
+            return imported, errors
 
         for item in msg_list:
             msg_num = int(item.split()[0])
@@ -90,13 +135,16 @@ def main():
                     service.users().messages().import_(
                         userId="me", body=body
                     ).execute()
+                    imported += 1
                 except HttpError as e:
-                    print(f"[ERROR] msg {msg_num}: {e}", file=sys.stderr)
+                    print(f"[{name}] ERROR msg {msg_num}: {e}", file=sys.stderr)
+                    errors += 1
 
                 pop.dele(msg_num)
 
             except Exception as e:
-                print(f"[ERROR] msg {msg_num}: {e}", file=sys.stderr)
+                print(f"[{name}] ERROR msg {msg_num}: {e}", file=sys.stderr)
+                errors += 1
                 try:
                     pop.dele(msg_num)
                 except Exception:
@@ -107,6 +155,37 @@ def main():
             pop.quit()
         except Exception:
             pass
+
+    return imported, errors
+
+
+def main():
+    acquire_lock()
+
+    instances = get_instances()
+    if not instances:
+        sys.exit("[FATAL] no instances found in instances/")
+
+    for name, d in instances:
+        err = validate_instance(name, d)
+        if err:
+            sys.exit(f"[FATAL] {name}: {err}")
+
+    any_output = False
+    for name, d in instances:
+        try:
+            imported, errors = process_instance(name, d)
+        except Exception as e:
+            print(f"[{name}] ERROR: {e}", file=sys.stderr)
+            any_output = True
+            continue
+
+        if imported > 0 or errors > 0:
+            print(f"{name}: {imported} imported, {errors} errors")
+            any_output = True
+
+    if not any_output:
+        print("no new mail")
 
 
 if __name__ == "__main__":
