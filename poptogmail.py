@@ -4,6 +4,7 @@ import sys
 import atexit
 import base64
 import poplib
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
@@ -17,6 +18,7 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 poplib._MAXLINE = 10_000_000
 
 LOCKFILE = "/tmp/poptogmail.lock"
+MAX_LOG_LINES = 1000
 
 
 def _release_lock():
@@ -100,6 +102,23 @@ def validate_instance(name, d):
     return None
 
 
+def write_log(log_path, lines):
+    if not lines:
+        return
+
+    existing = []
+    if os.path.exists(log_path):
+        with open(log_path) as f:
+            existing = f.read().splitlines()
+
+    all_lines = existing + lines
+    if len(all_lines) > MAX_LOG_LINES:
+        all_lines = all_lines[-MAX_LOG_LINES:]
+
+    with open(log_path, "w") as f:
+        f.write("\n".join(all_lines) + "\n")
+
+
 def process_instance(name, d):
     env_path = os.path.join(d, ".env")
     load_dotenv(env_path)
@@ -112,6 +131,7 @@ def process_instance(name, d):
 
     imported = 0
     errors = 0
+    log_lines = []
 
     pop = poplib.POP3_SSL(host, 995, timeout=30)
     try:
@@ -120,7 +140,9 @@ def process_instance(name, d):
 
         resp, msg_list, _ = pop.list()
         if not msg_list:
-            return imported, errors
+            return
+
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         for item in msg_list:
             msg_num = int(item.split()[0])
@@ -137,13 +159,13 @@ def process_instance(name, d):
                     ).execute()
                     imported += 1
                 except HttpError as e:
-                    print(f"[{name}] ERROR msg {msg_num}: {e}", file=sys.stderr)
+                    log_lines.append(f"[{ts}] ERROR msg {msg_num}: {e}")
                     errors += 1
 
                 pop.dele(msg_num)
 
             except Exception as e:
-                print(f"[{name}] ERROR msg {msg_num}: {e}", file=sys.stderr)
+                log_lines.append(f"[{ts}] ERROR msg {msg_num}: {e}")
                 errors += 1
                 try:
                     pop.dele(msg_num)
@@ -156,7 +178,10 @@ def process_instance(name, d):
         except Exception:
             pass
 
-    return imported, errors
+    if imported > 0 or errors > 0:
+        log_lines.insert(0, f"[{ts}] {name}: {imported} imported, {errors} errors")
+
+    write_log(os.path.join(d, f"{name}.log"), log_lines)
 
 
 def main():
@@ -171,21 +196,11 @@ def main():
         if err:
             sys.exit(f"[FATAL] {name}: {err}")
 
-    any_output = False
     for name, d in instances:
         try:
-            imported, errors = process_instance(name, d)
+            process_instance(name, d)
         except Exception as e:
             print(f"[{name}] ERROR: {e}", file=sys.stderr)
-            any_output = True
-            continue
-
-        if imported > 0 or errors > 0:
-            print(f"{name}: {imported} imported, {errors} errors")
-            any_output = True
-
-    if not any_output:
-        print("no new mail")
 
 
 if __name__ == "__main__":

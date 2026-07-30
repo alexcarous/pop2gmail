@@ -100,7 +100,7 @@ uv run python poptogmail.py
 ### 7. Schedule with cron (optional)
 
 ```
-0 * * * * cd /home/alex/scripts/poptogmail && uv run python poptogmail.py
+0 * * * * cd /home/alex/scripts/poptogmail && uv run python poptogmail.py > /dev/null 2>&1
 ```
 
 One cron line covers all instances. No flags needed.
@@ -111,22 +111,24 @@ One cron line covers all instances. No flags needed.
 uv run python poptogmail.py
 ```
 
-Output when mail is processed:
+The script is silent on stdout. Results are written to per-instance log files
+at `instances/<name>/<name>.log`. Logs are kept in RAM during the run and
+written once at the end. Each log is capped at 1000 lines (oldest trimmed).
+
+Example `instances/home/home.log` after a run:
 
 ```
-home: 12 imported, 0 errors
-work: 5 imported, 1 errors
+[2026-07-30T14:02:03Z] home: 12 imported, 0 errors
+[2026-07-30T14:02:04Z] home: 5 imported, 1 errors
+[2026-07-30T14:02:04Z] ERROR msg 47: <HttpError ...>
 ```
 
-Output when no mail is pending:
-
-```
-no new mail
-```
+If there are no messages and no errors, nothing is written — no log entry, no
+file modification.
 
 If any instance fails validation (wrong Gmail account, POP3 unreachable, etc.),
-the script exits before processing any mail for any account. Errors during
-import are logged to stderr and the script continues to the next instance.
+the script exits before processing any mail for any account. Fatal errors are
+printed to stderr.
 
 ## File structure
 
@@ -145,7 +147,8 @@ poptogmail/
 │   ├── home/                 # your first instance (gitignored)
 │   │   ├── .env
 │   │   ├── credentials.json
-│   │   └── token.json
+│   │   ├── token.json
+│   │   └── home.log
 │   └── work/                 # your second instance (gitignored)
 │       └── ...
 └── scratch/                  # scratch files (gitignored)
