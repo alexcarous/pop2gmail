@@ -90,7 +90,7 @@ def validate_instance(name, d):
         return "EXPECTED_GMAIL not set"
 
     service = get_gmail_service(d)
-    profile = service.users().getProfile(userId="me").execute()
+    profile = service.users().getProfile(userId="me").execute(num_retries=5)
     actual = profile["emailAddress"]
     if actual.lower() != expected.lower():
         return f"Gmail mismatch: expected '{expected}', got '{actual}'"
@@ -175,7 +175,7 @@ def process_instance(name, d):
                     try:
                         service.users().messages().import_(
                             userId="me", body=body
-                        ).execute()
+                        ).execute(num_retries=5)
                         imported += 1
                         pop.dele(msg_num)  # Only delete from POP3 server if import succeeded
                         time.sleep(1)      # 1 second pause between successful imports
