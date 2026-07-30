@@ -6,7 +6,7 @@ import base64
 import poplib
 from datetime import datetime, timezone
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -17,7 +17,8 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 poplib._MAXLINE = 10_000_000
 
-LOCKFILE = "/tmp/poptogmail.lock"
+# Localize lockfile to script directory to avoid multi-user permission conflicts
+LOCKFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "poptogmail.lock")
 MAX_LOG_LINES = 1000
 
 
@@ -55,8 +56,13 @@ def get_gmail_service(instance_dir):
     else:
         flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
         creds = flow.run_console()
-    with open(token_path, "w") as token:
+    
+    # Save token.json with secure 600 permissions (read/write by owner only)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    mode = 0o600
+    with os.fdopen(os.open(token_path, flags, mode), "w") as token:
         token.write(creds.to_json())
+        
     return build("gmail", "v1", credentials=creds)
 
 
@@ -75,9 +81,9 @@ def get_instances():
 
 def validate_instance(name, d):
     env_path = os.path.join(d, ".env")
-    load_dotenv(env_path)
+    config = dotenv_values(env_path)
 
-    expected = os.environ.get("EXPECTED_GMAIL", "").strip()
+    expected = config.get("EXPECTED_GMAIL", "").strip()
     if not expected:
         return "EXPECTED_GMAIL not set"
 
@@ -87,9 +93,17 @@ def validate_instance(name, d):
     if actual.lower() != expected.lower():
         return f"Gmail mismatch: expected '{expected}', got '{actual}'"
 
-    host = os.environ["POP3_HOST"]
-    users = [u.strip() for u in os.environ["POP3_USERS"].split(",") if u.strip()]
-    password = os.environ["POP3_PASS"]
+    host = config.get("POP3_HOST")
+    if not host:
+        return "POP3_HOST not set"
+    pop3_users_raw = config.get("POP3_USERS")
+    if not pop3_users_raw:
+        return "POP3_USERS not set"
+    
+    users = [u.strip() for u in pop3_users_raw.split(",") if u.strip()]
+    password = config.get("POP3_PASS")
+    if not password:
+        return "POP3_PASS not set"
 
     for user in users:
         try:
@@ -122,11 +136,12 @@ def write_log(log_path, lines):
 
 def process_instance(name, d):
     env_path = os.path.join(d, ".env")
-    load_dotenv(env_path)
+    config = dotenv_values(env_path)
 
-    host = os.environ["POP3_HOST"]
-    users = [u.strip() for u in os.environ["POP3_USERS"].split(",") if u.strip()]
-    password = os.environ["POP3_PASS"]
+    host = config.get("POP3_HOST")
+    pop3_users_raw = config.get("POP3_USERS")
+    users = [u.strip() for u in pop3_users_raw.split(",") if u.strip()]
+    password = config.get("POP3_PASS")
 
     service = get_gmail_service(d)
 
@@ -193,13 +208,16 @@ def main():
     if not instances:
         sys.exit("[FATAL] no instances found in instances/")
 
-    for name, d in instances:
-        err = validate_instance(name, d)
-        if err:
-            sys.exit(f"[FATAL] {name}: {err}")
-
+    # Process instances sequentially; if one fails validation, print error, log it, and continue to others.
     for name, d in instances:
         try:
+            err = validate_instance(name, d)
+            if err:
+                print(f"[{name}] Validation failed: {err}", file=sys.stderr)
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                write_log(os.path.join(d, f"{name}.log"), [f"[{ts}] Validation failed: {err}"])
+                continue
+            
             process_instance(name, d)
         except Exception as e:
             print(f"[{name}] ERROR: {e}", file=sys.stderr)
