@@ -77,9 +77,10 @@ uv run python poptogmail.py
 ```
 
 The script validates and processes all instances. Any instance without a
-`token.json` will open a browser for Google sign-in. After authorizing, a
-`token.json` is created in that instance's directory with a long-lived
-refresh token. Subsequent runs are fully unattended.
+`token.json` will print an authorization URL. Open that URL in a browser on
+any device, sign in to Google, and paste the resulting code back into the
+terminal. A `token.json` is created with a long-lived refresh token.
+Subsequent runs are fully unattended.
 
 ### 5. Secure credential files
 

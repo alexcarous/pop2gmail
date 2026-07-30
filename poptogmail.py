@@ -54,7 +54,7 @@ def get_gmail_service(instance_dir):
         creds.refresh(Request())
     else:
         flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
-        creds = flow.run_local_server(port=0)
+        creds = flow.run_console()
     with open(token_path, "w") as token:
         token.write(creds.to_json())
     return build("gmail", "v1", credentials=creds)
@@ -88,16 +88,17 @@ def validate_instance(name, d):
         return f"Gmail mismatch: expected '{expected}', got '{actual}'"
 
     host = os.environ["POP3_HOST"]
-    user = os.environ["POP3_USER"]
+    users = [u.strip() for u in os.environ["POP3_USERS"].split(",") if u.strip()]
     password = os.environ["POP3_PASS"]
 
-    try:
-        pop = poplib.POP3_SSL(host, 995, timeout=10)
-        pop.user(user)
-        pop.pass_(password)
-        pop.quit()
-    except Exception as e:
-        return f"POP3 error: {e}"
+    for user in users:
+        try:
+            pop = poplib.POP3_SSL(host, 995, timeout=10)
+            pop.user(user)
+            pop.pass_(password)
+            pop.quit()
+        except Exception as e:
+            return f"POP3 error for {user}: {e}"
 
     return None
 
@@ -124,7 +125,7 @@ def process_instance(name, d):
     load_dotenv(env_path)
 
     host = os.environ["POP3_HOST"]
-    user = os.environ["POP3_USER"]
+    users = [u.strip() for u in os.environ["POP3_USERS"].split(",") if u.strip()]
     password = os.environ["POP3_PASS"]
 
     service = get_gmail_service(d)
@@ -133,50 +134,51 @@ def process_instance(name, d):
     errors = 0
     log_lines = []
 
-    pop = poplib.POP3_SSL(host, 995, timeout=30)
-    try:
-        pop.user(user)
-        pop.pass_(password)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        resp, msg_list, _ = pop.list()
-        if not msg_list:
-            return
-
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        for item in msg_list:
-            msg_num = int(item.split()[0])
-            try:
-                resp, lines, _ = pop.retr(msg_num)
-                raw_bytes = b"".join(lines)
-
-                encoded = base64.urlsafe_b64encode(raw_bytes).decode("ascii")
-                body = {"raw": encoded, "internalDateSource": "dateHeader"}
-
-                try:
-                    service.users().messages().import_(
-                        userId="me", body=body
-                    ).execute()
-                    imported += 1
-                except HttpError as e:
-                    log_lines.append(f"[{ts}] ERROR msg {msg_num}: {e}")
-                    errors += 1
-
-                pop.dele(msg_num)
-
-            except Exception as e:
-                log_lines.append(f"[{ts}] ERROR msg {msg_num}: {e}")
-                errors += 1
-                try:
-                    pop.dele(msg_num)
-                except Exception:
-                    pass
-
-    finally:
+    for user in users:
+        pop = poplib.POP3_SSL(host, 995, timeout=30)
         try:
-            pop.quit()
-        except Exception:
-            pass
+            pop.user(user)
+            pop.pass_(password)
+
+            resp, msg_list, _ = pop.list()
+            if not msg_list:
+                continue
+
+            for item in msg_list:
+                msg_num = int(item.split()[0])
+                try:
+                    resp, lines, _ = pop.retr(msg_num)
+                    raw_bytes = b"".join(lines)
+
+                    encoded = base64.urlsafe_b64encode(raw_bytes).decode("ascii")
+                    body = {"raw": encoded, "internalDateSource": "dateHeader"}
+
+                    try:
+                        service.users().messages().import_(
+                            userId="me", body=body
+                        ).execute()
+                        imported += 1
+                    except HttpError as e:
+                        log_lines.append(f"[{ts}] ERROR {user} msg {msg_num}: {e}")
+                        errors += 1
+
+                    pop.dele(msg_num)
+
+                except Exception as e:
+                    log_lines.append(f"[{ts}] ERROR {user} msg {msg_num}: {e}")
+                    errors += 1
+                    try:
+                        pop.dele(msg_num)
+                    except Exception:
+                        pass
+
+        finally:
+            try:
+                pop.quit()
+            except Exception:
+                pass
 
     if imported > 0 or errors > 0:
         log_lines.insert(0, f"[{ts}] {name}: {imported} imported, {errors} errors")
