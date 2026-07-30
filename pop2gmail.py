@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
+"""
+POP3 to Gmail sync utility.
+Fetches emails from POP3 mailboxes and imports them into Gmail.
+Supports multi-instance configurations.
+"""
+
 import os
 import sys
 import time
 import fcntl
 import base64
 import poplib
+import socket
+import signal
+import argparse
 from datetime import datetime, timezone
+from typing import List, Tuple, Optional
 
 from dotenv import dotenv_values
 from google.oauth2.credentials import Credentials
@@ -25,9 +35,23 @@ MAX_LOG_LINES = 1000
 MAX_MESSAGES_PER_RUN = 100
 
 _lock_file = None
+termination_requested = False
 
 
-def acquire_lock():
+def signal_handler(signum, frame) -> None:
+    """Handles termination signals gracefully by setting a flag."""
+    global termination_requested
+    termination_requested = True
+    print("\n[INFO] Termination requested. Gracefully stopping after current message...", file=sys.stderr)
+
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+
+def acquire_lock() -> None:
+    """Acquires a kernel-level file lock to prevent concurrent runs."""
     global _lock_file
     _lock_file = open(LOCKFILE, "w")
     try:
@@ -36,17 +60,26 @@ def acquire_lock():
         sys.exit("[FATAL] another instance is running")
 
 
-def get_gmail_service(instance_dir):
+def get_gmail_service(instance_dir: str):
+    """Retrieves or refreshes the Gmail API service client."""
     token_path = os.path.join(instance_dir, "token.json")
     creds_path = os.path.join(instance_dir, "credentials.json")
     creds = None
+    
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+        
     if creds and creds.valid:
         return build("gmail", "v1", credentials=creds)
+        
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    else:
+        try:
+            creds.refresh(Request())
+        except Exception as e:
+            print(f"[WARNING] Refreshing OAuth token failed: {e}. Re-authenticating...", file=sys.stderr)
+            creds = None  # Force re-authentication flow
+            
+    if not creds or not creds.valid:
         flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
         creds = flow.run_console()
     
@@ -59,7 +92,8 @@ def get_gmail_service(instance_dir):
     return build("gmail", "v1", credentials=creds)
 
 
-def get_instances():
+def get_instances() -> List[Tuple[str, str]]:
+    """Discovers valid non-example instance subdirectories, avoiding symlinks."""
     instances = []
     base = "instances"
     if not os.path.isdir(base):
@@ -67,21 +101,31 @@ def get_instances():
     for name in sorted(os.listdir(base)):
         d = os.path.join(base, name)
         env_path = os.path.join(d, ".env")
-        if os.path.isdir(d) and name != "example" and os.path.isfile(env_path):
+        # Ensure we do not follow symlinks for safety
+        if os.path.isdir(d) and not os.path.islink(d) and name != "example" and os.path.isfile(env_path):
             instances.append((name, d))
     return instances
 
 
-def validate_instance(name, d):
+def validate_instance(name: str, d: str) -> Optional[str]:
+    """Validates the configuration and connection for a specific instance."""
     env_path = os.path.join(d, ".env")
     config = dotenv_values(env_path)
 
     expected = config.get("EXPECTED_GMAIL", "").strip()
     if not expected:
-        return "EXPECTED_GMAIL not set"
+        return "EXPECTED_GMAIL not set in .env"
 
-    service = get_gmail_service(d)
-    profile = service.users().getProfile(userId="me").execute(num_retries=5)
+    creds_path = os.path.join(d, "credentials.json")
+    if not os.path.exists(creds_path):
+        return "credentials.json missing in instance directory"
+
+    try:
+        service = get_gmail_service(d)
+        profile = service.users().getProfile(userId="me").execute(num_retries=5)
+    except Exception as e:
+        return f"Gmail API verification failed: {e}"
+
     actual = profile["emailAddress"]
     if actual.lower() != expected.lower():
         return f"Gmail mismatch: expected '{expected}', got '{actual}'"
@@ -98,19 +142,23 @@ def validate_instance(name, d):
     if not password:
         return "POP3_PASS not set"
 
+    port = int(config.get("POP3_PORT", 995))
+    timeout = int(config.get("POP3_TIMEOUT", 10))
+
     for user in users:
         try:
-            pop = poplib.POP3_SSL(host, 995, timeout=10)
+            pop = poplib.POP3_SSL(host, port, timeout=timeout)
             pop.user(user)
             pop.pass_(password)
             pop.quit()
         except Exception as e:
-            return f"POP3 error for {user}: {e}"
+            return f"POP3 connection error for {user}: {e}"
 
     return None
 
 
-def write_log(log_path, lines):
+def write_log(log_path: str, lines: List[str]) -> None:
+    """Appends log lines to file and prints them to terminal for console feedback."""
     if not lines:
         return
 
@@ -125,9 +173,13 @@ def write_log(log_path, lines):
 
     with open(log_path, "w") as f:
         f.write("\n".join(all_lines) + "\n")
+        
+    for line in lines:
+        print(line)
 
 
-def process_instance(name, d):
+def process_instance(name: str, d: str, dry_run: bool) -> None:
+    """Processes message retrieval and GMail import for a specific instance."""
     env_path = os.path.join(d, ".env")
     config = dotenv_values(env_path)
 
@@ -135,6 +187,12 @@ def process_instance(name, d):
     pop3_users_raw = config.get("POP3_USERS")
     users = [u.strip() for u in pop3_users_raw.split(",") if u.strip()]
     password = config.get("POP3_PASS")
+    
+    port = int(config.get("POP3_PORT", 995))
+    timeout = int(config.get("POP3_TIMEOUT", 30))
+    
+    gmail_labels_raw = config.get("GMAIL_LABELS", "INBOX,UNREAD")
+    label_ids = [lbl.strip() for lbl in gmail_labels_raw.split(",") if lbl.strip()]
 
     service = get_gmail_service(d)
 
@@ -145,7 +203,10 @@ def process_instance(name, d):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     for user in users:
-        pop = poplib.POP3_SSL(host, 995, timeout=30)
+        if termination_requested:
+            break
+            
+        pop = poplib.POP3_SSL(host, port, timeout=timeout)
         try:
             pop.user(user)
             pop.pass_(password)
@@ -158,21 +219,32 @@ def process_instance(name, d):
             msgs_to_process = msg_list[:MAX_MESSAGES_PER_RUN]
 
             for item in msgs_to_process:
+                if termination_requested:
+                    break
+                    
                 msg_num = int(item.split()[0])
                 try:
                     resp, lines, _ = pop.retr(msg_num)
                     raw_bytes = b"".join(lines)
 
                     encoded = base64.urlsafe_b64encode(raw_bytes).decode("ascii")
-                    body = {"raw": encoded, "internalDateSource": "dateHeader"}
+                    body = {
+                        "raw": encoded, 
+                        "internalDateSource": "dateHeader",
+                        "labelIds": label_ids
+                    }
 
                     try:
-                        service.users().messages().import_(
-                            userId="me", body=body
-                        ).execute(num_retries=5)
-                        imported += 1
-                        pop.dele(msg_num)  # Only delete from POP3 server if import succeeded
-                        time.sleep(1)      # 1 second pause between successful imports
+                        if dry_run:
+                            log_lines.append(f"[{ts}] [DRY-RUN] Would import {user} msg {msg_num} with labels {label_ids}")
+                            imported += 1
+                        else:
+                            service.users().messages().import_(
+                                userId="me", body=body
+                            ).execute(num_retries=5)
+                            imported += 1
+                            pop.dele(msg_num)  # Only delete from POP3 server if import succeeded
+                            time.sleep(1)      # 1 second pause between successful imports
                     except HttpError as e:
                         log_lines.append(f"[{ts}] ERROR {user} msg {msg_num}: {e}")
                         errors += 1
@@ -188,20 +260,34 @@ def process_instance(name, d):
                 pass
 
     if imported > 0 or errors > 0:
-        log_lines.insert(0, f"[{ts}] {name}: {imported} imported, {errors} errors")
+        dry_prefix = "[DRY-RUN] " if dry_run else ""
+        log_lines.insert(0, f"[{ts}] {dry_prefix}{name}: {imported} processed, {errors} errors")
 
     write_log(os.path.join(d, f"{name}.log"), log_lines)
 
 
-def main():
+def main() -> None:
+    parser = argparse.ArgumentParser(description="POP3 to Gmail sync utility.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Perform a dry run without importing emails to Gmail or deleting them from POP3."
+    )
+    args = parser.parse_args()
+
+    # Apply default timeout globally for all sockets (defensive measure)
+    socket.setdefaulttimeout(60)
+    
     acquire_lock()
 
     instances = get_instances()
     if not instances:
         sys.exit("[FATAL] no instances found in instances/")
 
-    # Process instances sequentially; if one fails validation, print error, log it, and continue to others.
+    # Validate all instances
     for name, d in instances:
+        if termination_requested:
+            break
         try:
             err = validate_instance(name, d)
             if err:
@@ -210,7 +296,7 @@ def main():
                 write_log(os.path.join(d, f"{name}.log"), [f"[{ts}] Validation failed: {err}"])
                 continue
             
-            process_instance(name, d)
+            process_instance(name, d, args.dry_run)
         except Exception as e:
             print(f"[{name}] ERROR: {e}", file=sys.stderr)
 
