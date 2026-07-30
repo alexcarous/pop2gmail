@@ -43,61 +43,97 @@ uv sync
   - Add your email as a test user
 - **Create OAuth client ID:** APIs & Services → Credentials → Create Credentials → OAuth client ID
   - Application type: Desktop app
-  - Download the JSON and save it as `credentials.json` in the project directory
+  - Download the JSON and save it into your instance directory (see step 3)
 
-### 3. Configure POP3 credentials
+### 3. Create an instance
 
-```bash
-cp .env.example .env
+Each email account lives in its own instance directory under `instances/`. The
+layout for an instance called `home`:
+
+```
+instances/home/
+├── .env              # POP3 credentials + EXPECTED_GMAIL
+├── credentials.json  # OAuth client ID (from Google Cloud Console)
+└── token.json        # OAuth refresh token (auto-generated on first run)
 ```
 
-Edit `.env` with your POP3 host, username, and password.
+Start from the example:
+
+```bash
+cp -r instances/example instances/home
+```
+
+Edit `instances/home/.env` with your POP3 host, username, and password. **You
+must also set `EXPECTED_GMAIL`** — this is the Gmail address the OAuth token
+should resolve to. The script verifies this before processing any mail, so the
+wrong credentials can never import into the wrong inbox.
 
 ### 4. First run — authorize with Google
 
 ```bash
-uv run python poptogmail.py
+uv run python poptogmail.py --instance home
 ```
 
 This opens a browser for Google sign-in. After authorizing, a `token.json`
-file is created with a long-lived refresh token. Subsequent runs are
-fully unattended.
+file is created in the instance directory with a long-lived refresh token.
+Subsequent runs are fully unattended.
 
 ### 5. Secure credential files
 
 ```bash
-chmod 600 .env token.json
+chmod -R 600 instances/home/.env instances/home/token.json
 ```
 
-### 6. Schedule with cron (optional)
+### 6. Additional instances
+
+Repeat steps 3-5 for each additional account, using a different instance name:
+
+```bash
+cp -r instances/example instances/work
+# edit instances/work/.env with that account's credentials
+uv run python poptogmail.py --instance work
+```
+
+### 7. Schedule with cron (optional)
 
 ```
-0 * * * * cd /home/pi/poptogmail && uv run python poptogmail.py
+0 * * * * cd /home/alex/scripts/poptogmail && uv run python poptogmail.py --instance home
+0 * * * * cd /home/alex/scripts/poptogmail && uv run python poptogmail.py --instance work
 ```
 
 ## Running
 
 ```bash
-uv run python poptogmail.py
+uv run python poptogmail.py --instance <name>
 ```
 
 The script is silent on success. Errors are printed to stderr with
 `[ERROR] msg <n>: <detail>`.
 
+If the OAuth token resolves to a Gmail address different from `EXPECTED_GMAIL`,
+the script exits immediately with a fatal error before processing any mail.
+
 ## File structure
 
 ```
 poptogmail/
-├── .venv/                   # virtual environment (uv)
-├── credentials.json         # OAuth client ID (you create this)
-├── token.json               # OAuth refresh token (auto-generated)
-├── poptogmail.py            # main script
-├── pyproject.toml           # project config
-├── uv.lock                  # pinned dependencies
-├── requirements.txt         # dependencies (compatibility)
-├── .env                     # POP3 credentials (you create this)
-├── .env.example             # template for .env
-└── .gitignore
+├── .venv/                    # virtual environment (uv)
+├── poptogmail.py             # main script
+├── pyproject.toml            # project config
+├── uv.lock                   # pinned dependencies
+├── requirements.txt          # dependencies (compatibility)
+├── .env.example              # template for root .env (not used)
+├── .gitignore
+├── instances/
+│   ├── example/              # template for new instances
+│   │   └── .env.example
+│   ├── home/                 # your first instance
+│   │   ├── .env
+│   │   ├── credentials.json
+│   │   └── token.json
+│   └── work/                 # your second instance
+│       └── ...
+└── scratch/                  # scratch files (gitignored, you create this)
 ```
 
 ## Security notes
@@ -106,4 +142,6 @@ poptogmail/
 - Restrict with `chmod 600` to limit exposure to the file owner
 - No email content is written to disk at any point
 - All network connections use TLS (POP3 on 995, Gmail API over HTTPS)
-- Revoke the token at any time at https://myaccount.google.com/permissions
+- `EXPECTED_GMAIL` check prevents misrouting: if the OAuth token resolves to an
+  unexpected address, the script aborts before processing any mail
+- Revoke tokens at any time at https://myaccount.google.com/permissions

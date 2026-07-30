@@ -1,5 +1,6 @@
 scratch/
-instances/
+instances/*
+!instances/example/
 .env
 token.json
 credentials.json

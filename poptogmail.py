@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import os
 import sys
 import base64
@@ -16,29 +17,56 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 poplib._MAXLINE = 10_000_000
 
 
-def get_gmail_service():
+def get_gmail_service(instance_dir):
+    token_path = os.path.join(instance_dir, "token.json")
+    creds_path = os.path.join(instance_dir, "credentials.json")
     creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    if os.path.exists(token_path):
+        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
     if creds and creds.valid:
         return build("gmail", "v1", credentials=creds)
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
     else:
-        flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
+        flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
         creds = flow.run_local_server(port=0)
-    with open("token.json", "w") as token:
+    with open(token_path, "w") as token:
         token.write(creds.to_json())
     return build("gmail", "v1", credentials=creds)
 
 
 def main():
-    load_dotenv()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--instance", required=True, help="instance name under instances/")
+    args = parser.parse_args()
+
+    instance_dir = os.path.join("instances", args.instance)
+    env_path = os.path.join(instance_dir, ".env")
+
+    if not os.path.isdir(instance_dir):
+        sys.exit(f"[FATAL] instance directory not found: {instance_dir}")
+    if not os.path.isfile(env_path):
+        sys.exit(f"[FATAL] .env not found in instance directory: {instance_dir}")
+
+    load_dotenv(env_path)
+
+    expected_gmail = os.environ.get("EXPECTED_GMAIL", "").strip()
+    if not expected_gmail:
+        sys.exit("[FATAL] EXPECTED_GMAIL is not set in .env")
+
     host = os.environ["POP3_HOST"]
     user = os.environ["POP3_USER"]
     password = os.environ["POP3_PASS"]
 
-    service = get_gmail_service()
+    service = get_gmail_service(instance_dir)
+
+    profile = service.users().getProfile(userId="me").execute()
+    actual_email = profile["emailAddress"]
+    if actual_email.lower() != expected_gmail.lower():
+        sys.exit(
+            f"[FATAL] Gmail account mismatch: "
+            f"expected '{expected_gmail}', got '{actual_email}'"
+        )
 
     pop = poplib.POP3_SSL(host, 995, timeout=30)
     try:
