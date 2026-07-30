@@ -138,7 +138,6 @@ poptogmail/
 ├── poptogmail.py             # main script
 ├── pyproject.toml            # project config
 ├── uv.lock                   # pinned dependencies
-├── requirements.txt          # dependencies (compatibility)
 ├── .env.example              # template for root .env (documentation only)
 ├── .gitignore
 ├── instances/
