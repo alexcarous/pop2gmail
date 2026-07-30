@@ -2,7 +2,7 @@
 import os
 import sys
 import time
-import atexit
+import fcntl
 import base64
 import poplib
 from datetime import datetime, timezone
@@ -22,27 +22,18 @@ poplib._MAXLINE = 35_000_000
 # Localize lockfile to script directory to avoid multi-user permission conflicts
 LOCKFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "poptogmail.lock")
 MAX_LOG_LINES = 1000
+MAX_MESSAGES_PER_RUN = 100
 
-
-def _release_lock():
-    try:
-        os.remove(LOCKFILE)
-    except FileNotFoundError:
-        pass
+_lock_file = None
 
 
 def acquire_lock():
-    if os.path.exists(LOCKFILE):
-        with open(LOCKFILE) as f:
-            pid = f.read().strip()
-        try:
-            os.kill(int(pid), 0)
-            sys.exit(f"[FATAL] another instance is running (pid {pid})")
-        except (OSError, ValueError, ProcessLookupError):
-            pass
-    with open(LOCKFILE, "w") as f:
-        f.write(str(os.getpid()))
-    atexit.register(_release_lock)
+    global _lock_file
+    _lock_file = open(LOCKFILE, "w")
+    try:
+        fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit("[FATAL] another instance is running")
 
 
 def get_gmail_service(instance_dir):
@@ -163,7 +154,10 @@ def process_instance(name, d):
             if not msg_list:
                 continue
 
-            for item in msg_list:
+            # Limit the number of messages processed in this run to avoid connection timeouts
+            msgs_to_process = msg_list[:MAX_MESSAGES_PER_RUN]
+
+            for item in msgs_to_process:
                 msg_num = int(item.split()[0])
                 try:
                     resp, lines, _ = pop.retr(msg_num)
