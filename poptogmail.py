@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
+import time
 import atexit
 import base64
 import poplib
@@ -15,7 +16,8 @@ from googleapiclient.errors import HttpError
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
-poplib._MAXLINE = 10_000_000
+# Set line limit to 35MB to support retrieving emails up to 25MB (accounting for ~33% base64 overhead)
+poplib._MAXLINE = 35_000_000
 
 # Localize lockfile to script directory to avoid multi-user permission conflicts
 LOCKFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "poptogmail.lock")
@@ -175,19 +177,15 @@ def process_instance(name, d):
                             userId="me", body=body
                         ).execute()
                         imported += 1
+                        pop.dele(msg_num)  # Only delete from POP3 server if import succeeded
+                        time.sleep(1)      # 1 second pause between successful imports
                     except HttpError as e:
                         log_lines.append(f"[{ts}] ERROR {user} msg {msg_num}: {e}")
                         errors += 1
 
-                    pop.dele(msg_num)
-
                 except Exception as e:
                     log_lines.append(f"[{ts}] ERROR {user} msg {msg_num}: {e}")
                     errors += 1
-                    try:
-                        pop.dele(msg_num)
-                    except Exception:
-                        pass
 
         finally:
             try:
