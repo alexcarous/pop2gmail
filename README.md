@@ -22,8 +22,9 @@ in a single run:
 4. For each message (up to 100 messages per run to avoid POP3 session timeouts):
    - Downloads raw bytes (supports messages up to 25MB).
    - Encodes to base64url.
-   - Imports into Gmail via `users.messages.import` with specified label IDs, preserving original timestamps.
-   - A 1-second pause is applied between successful imports to stay within Gmail API rate limits.
+    - Imports into Gmail via `users.messages.import` with specified label IDs, preserving original timestamps.
+    - Adds an `X-Imported-By: pop2gmail` header to each message for auditing (visible via Gmail's "Show original").
+    - A 1-second pause is applied between successful imports to stay within Gmail API rate limits.
    - Deletes the message from the POP3 server **only** if the Gmail import succeeded (preventing data loss).
 5. If the script is interrupted (e.g. `Ctrl+C`), it gracefully finishes the current message before exiting.
 
