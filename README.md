@@ -4,6 +4,12 @@ Import emails from multiple POP3 mailboxes into Gmail via the Gmail API.
 Designed for migrating email from providers like mailserver, with minimal overhead
 and no local attachment processing.
 
+Google discontinued POP3-based Gmail fetching in October 2024. This script
+provides a self-hosted alternative: it pulls mail from POP3 servers and imports
+it into Gmail using the Gmail API, preserving original timestamps and labels.
+Each message passes through Google's spam/malware scanning on import, just like
+the old built-in POP3 fetch.
+
 ## How it works
 
 The script scans `instances/` for configured accounts and processes them all
@@ -48,11 +54,14 @@ Do this for each Gmail account you want to import into.
 - Go to [console.cloud.google.com](https://console.cloud.google.com)
 - Create a project (or select an existing one)
 - **Enable the Gmail API:** APIs & Services → Library → search "Gmail API" → Enable
-- **Configure OAuth consent screen:** APIs & Services → OAuth consent screen
-  - User type: External
-  - Fill in app name and support email
-  - Add scope: `https://www.googleapis.com/auth/gmail.modify`
-  - Add your email as a test user
+- **Configure OAuth consent screen:** Google Auth platform (skip the Get Started wizard if it appears)
+  - **Branding** tab: fill in app name, support email → Save
+  - **Audience** tab: select user type (External) → add your email as a test user → Save
+  - **Data Access** tab: Add or Remove Scopes → add all three:
+    - `https://www.googleapis.com/auth/gmail.insert`
+    - `https://www.googleapis.com/auth/userinfo.email`
+    - `openid`
+    → Save
 - **Create OAuth client ID:** APIs & Services → Credentials → Create Credentials → OAuth client ID
   - Application type: Desktop app
   - Download the JSON and save it into your instance directory (see step 3)
@@ -77,16 +86,28 @@ Edit `instances/home/.env`. The available variables are:
 | `POP3_PORT` | Optional. POP3 TLS port. | `995` |
 | `POP3_TIMEOUT` | Optional. POP3 network timeout in seconds. | `30` |
 | `GMAIL_LABELS` | Optional. Comma-separated list of label IDs to apply to imported emails. | `INBOX, UNREAD` |
+| `SUBJECT_PREFIX` | Optional. Text prepended to the Subject line of each imported email. | (none) |
+
+> **Tip:** Add a custom label (e.g. `IMPORTED`) to easily find imported messages.
+> Create the label in Gmail first (left sidebar → "Create new label"), then set
+> `GMAIL_LABELS=INBOX,UNREAD,IMPORTED` in your `.env`. All imported messages
+> will appear under that label in Gmail.
 
 Save your downloaded OAuth `credentials.json` into `instances/home/`.
 
-### 4. First run — authorize with Google
+### 4. Authenticate with Google
+
+Before syncing mail, each instance must be authenticated once:
 
 ```bash
-uv run python pop2gmail.py
+uv run python pop2gmail.py --auth home
 ```
 
-Any instance without a `token.json` will print an authorization URL. Open that URL in a browser on any device, sign in to Google, and paste the resulting code back into the terminal. A `token.json` is created with a long-lived refresh token. Subsequent runs are fully unattended.
+The script prints an authorization URL. Open that URL in a browser on any
+device, sign in to Google, authorize the app, then copy the full redirect URL
+from your browser's address bar (it will show a "connection refused" page — this
+is expected) and paste it back into the terminal. A `token.json` is created
+with a long-lived refresh token.
 
 The script automatically secures `token.json` with `600` permissions (owner read/write only).
 
@@ -105,7 +126,7 @@ Set up additional accounts the same way:
 ```bash
 cp -r instances/example instances/work
 # edit instances/work/.env, add credentials.json
-uv run python pop2gmail.py
+uv run python pop2gmail.py --auth work
 ```
 
 ### 7. Schedule with cron (optional)
@@ -115,14 +136,18 @@ uv run python pop2gmail.py
 ```
 
 One cron line covers all instances. No flags needed.
+Sync runs are fully unattended — instances without valid tokens are
+skipped with a log entry.
 
 ## Running
 
 ```bash
-uv run python pop2gmail.py [--dry-run]
+uv run python pop2gmail.py --auth home    # authenticate instance "home"
+uv run python pop2gmail.py [--dry-run]     # sync all instances
 ```
 
 ### Command Line Options
+* `--auth NAME`: Authenticate a specific instance using browser-based OAuth, then exit.
 * `--dry-run`: Performs a simulated sync. It connects to POP3 and authenticates, gets the count of messages, and outputs the simulated processing to the log without writing emails to Gmail or deleting them from the POP3 mailbox.
 
 ### Logs
@@ -168,4 +193,7 @@ pop2gmail/
 - All network connections use TLS (POP3 on 995/custom, Gmail API over HTTPS)
 - `EXPECTED_GMAIL` check prevents misrouting: the script validates every instance's Gmail identity before processing any mail.
 - Kernel-level locking (`pop2gmail.lock` in script root) prevents concurrent runs stomping on each other.
+- The script requests only the narrowest possible OAuth scopes:
+  `gmail.insert` (add mail only — no read, modify, or send) and
+  `userinfo.email` (see your email address for identity verification).
 - Revoke tokens at any time at https://myaccount.google.com/permissions

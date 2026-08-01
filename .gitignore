@@ -7,4 +7,6 @@ credentials.json
 __pycache__/
 .venv/
 *.pyc
+*.log
 pop2gmail.lock
+AGENTS.md
