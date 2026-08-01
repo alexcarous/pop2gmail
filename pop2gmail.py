@@ -45,6 +45,7 @@ poplib._MAXLINE = 35_000_000
 LOCKFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pop2gmail.lock")
 MAX_LOG_LINES = 1000
 MAX_MESSAGES_PER_RUN = 100
+IMPORT_HEADER = "pop2gmail"
 
 _lock_file = None
 termination_requested = False
@@ -302,6 +303,16 @@ def _modify_subject(raw: bytes, prefix: str) -> bytes:
     return b"\r\n".join(modified) + body
 
 
+def _add_header(raw: bytes, name: str, value: str) -> bytes:
+    header_end = raw.find(b"\r\n\r\n")
+    if header_end == -1:
+        header_end = raw.find(b"\n\n")
+    if header_end == -1:
+        return raw
+    header_line = f"{name}: {value}\r\n".encode("utf-8")
+    return raw[:header_end] + b"\r\n" + header_line + raw[header_end:]
+
+
 def process_instance(name: str, d: str, dry_run: bool, debug: bool = False) -> None:
     """Processes message retrieval and GMail import for a specific instance."""
     env_path = os.path.join(d, ".env")
@@ -352,6 +363,7 @@ def process_instance(name: str, d: str, dry_run: bool, debug: bool = False) -> N
                     raw_bytes = b"\r\n".join(lines)
                     raw_before = raw_bytes
                     raw_bytes = _deduplicate_headers(raw_bytes)
+                    raw_bytes = _add_header(raw_bytes, "X-Imported-By", IMPORT_HEADER)
 
                     prefix = config.get("SUBJECT_PREFIX", "").strip()
                     if prefix:
