@@ -2,7 +2,7 @@
 
 Imports emails from POP3 mailboxes into Gmail using the Gmail API. Designed as a lightweight, self-hosted alternative following Google's discontinuation of POP3 fetch in October 2024.
 
-Pull mail from providers like mailserver or any standard POP3 server and import it directly into Gmail with original timestamps, custom labels, and spam/malware scanning intact.
+Pull mail from any standard POP3 server and import it directly into Gmail with original timestamps, custom labels, and spam/malware scanning intact.
 
 ## Features
 
